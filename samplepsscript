@@ -1,0 +1,76 @@
+# Check if the Az module is installed
+$azModule = Get-Module -ListAvailable -Name Az
+
+if (-not $azModule) {
+    # Install the Az module if it's not installed
+    Install-Module -Name Az -AllowClobber -Force
+} else {
+    # Import the Az module if it's already installed
+    Import-Module Az
+}
+
+# Continue with the rest of your script
+$tenantId = ""
+$clientId = ""
+$clientSecret = ""
+$subscriptionId = ""
+$resourceGroupName = ""
+$storageAccountName = ""
+$containerName = ""
+$blobPath = ""
+$tempDir = [System.IO.Path]::GetTempPath()
+$localZipPath = Join-Path -Path $tempDir -ChildPath "results.zip"
+$extractPath = [System.IO.Path]::Combine($tempDir, "extracted")
+$timestamp = Get-Date -Format "yyyyMMddHHmmss"
+$consolidateCsvPath = "$extractPath\consolidate_result_$timestamp.csv"
+$destinationBlobPath = "consolidated_result/consolidate_result_$timestamp.csv"
+
+# Ensure the temporary directory is clean
+if ($localZipPath -and (Test-Path -Path $localZipPath)) {
+    Remove-Item -Path $localZipPath -Force
+}
+if ($extractPath -and (Test-Path -Path $extractPath)) {
+    Remove-Item -Path $extractPath -Recurse -Force
+}
+
+# Login to Azure using service principal
+$securePassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+$credential = New-Object System.Management.Automation.PSCredential($clientId, $securePassword)
+Connect-AzAccount -ServicePrincipal -Credential $credential -Tenant $tenantId
+
+Set-AzContext -SubscriptionId $subscriptionId
+
+$context = (Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $storageAccountName).Context
+
+# Download the ZIP file
+Get-AzStorageBlobContent -Blob $blobPath -Container $containerName -Destination $localZipPath -Context $context
+
+# Extract the ZIP file
+if ($localZipPath -and (Test-Path -Path $localZipPath)) {
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($localZipPath, $extractPath)
+} else {
+    Write-Error "The ZIP file was not downloaded correctly."
+    exit 1
+}
+
+# Get CSV files from the extracted directory
+$csvFiles = Get-ChildItem -Path $extractPath -Filter *.csv
+
+# Initialize an empty array to store the imported data
+$Data = @()
+
+# Loop through each CSV file and import the data
+foreach ($csvfile in $csvFiles) {
+    $data = Import-Csv -Path $csvfile.FullName
+    $Data += $data
+}
+
+# Export the consolidated data to a new CSV file
+$Data | Export-Csv -Path $consolidateCsvPath -NoTypeInformation
+
+# Upload the consolidated CSV file to the new folder in the same container
+Set-AzStorageBlobContent -File $consolidateCsvPath -Container $containerName -Blob $destinationBlobPath -Context $context
+
+Write-Output "Files extracted to: $extractPath"
+Write-Output "Consolidated CSV file created at: $consolidateCsvPath"
+Write-Output "Consolidated CSV file uploaded to: $destinationBlobPath"
